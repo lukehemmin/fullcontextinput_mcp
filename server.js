@@ -7,15 +7,6 @@ import {
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
-  CallToolResult,
-  ListToolsResult,
-  ListResourcesResult,
-  ReadResourceResult,
-  Tool,
-  Resource,
-  TextContent,
-  ImageContent,
-  EmbeddedResource,
 } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import path from 'path';
