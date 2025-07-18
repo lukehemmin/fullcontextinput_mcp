@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fullcontextinput_mcp": {
+      "command": "node",
+      "args": ["C:\\Users\\Administrator\\CascadeProjects\\fullcontextinput_mcp\\server.js"],
+      "env": {}
+    }
+  }
+}
