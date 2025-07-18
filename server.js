@@ -66,26 +66,44 @@ class FullContextInputMCPServer {
           },
           {
             name: 'find_files',
-            description: '프로젝트에서 특정 패턴의 파일들을 찾습니다.',
+            description: '파일 패턴으로 검색하여 매칭되는 파일 목록을 반환합니다.',
             inputSchema: {
               type: 'object',
               properties: {
                 pattern: {
                   type: 'string',
-                  description: '검색할 파일 패턴 (예: *.js, *.py, src/**/*.ts)'
+                  description: '검색할 파일 패턴 (glob 형식)'
                 },
                 workspace_path: {
                   type: 'string',
-                  description: '검색할 워크스페이스 경로',
-                  default: '.'
+                  description: '검색할 작업영역 경로'
                 }
               },
-              required: ['pattern']
+              required: ['pattern', 'workspace_path']
+            }
+          },
+          {
+            name: 'analyze_prompt_for_files',
+            description: '사용자 프롬프트를 분석하여 파일/디렉토리 요청을 자동 감지하고 적절한 MCP 도구를 제안합니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                user_prompt: {
+                  type: 'string',
+                  description: '분석할 사용자 프롬프트'
+                },
+                workspace_path: {
+                  type: 'string',
+                  description: '기본 작업영역 경로 (선택사항)',
+                  default: process.cwd()
+                }
+              },
+              required: ['user_prompt']
             }
           },
           {
             name: 'read_directory_context',
-            description: '디렉토리의 모든 코드 파일을 재귀적으로 읽어 전체 컨텍스트를 제공합니다.',
+            description: '디렉토리의 모든 코드 파일을 재귀적으로 읽어 전체 컨텍스트를 제공합니다. 컨텍스트 초과 방지 기능 포함.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -98,10 +116,30 @@ class FullContextInputMCPServer {
                   description: '최대 탐색 깊이 (기본값: 10)',
                   default: 10
                 },
+                max_files: {
+                  type: 'integer',
+                  description: '최대 파일 수 (기본값: 50)',
+                  default: 50
+                },
+                max_file_size: {
+                  type: 'integer',
+                  description: '최대 파일 크기 (bytes, 기본값: 50KB)',
+                  default: 51200
+                },
+                max_total_size: {
+                  type: 'integer',
+                  description: '최대 총 컨텍스트 크기 (bytes, 기본값: 500KB)',
+                  default: 512000
+                },
                 include_extensions: {
                   type: 'array',
                   description: '포함할 파일 확장자 목록 (기본값: 일반적인 코드 파일)',
                   items: { type: 'string' }
+                },
+                prioritize_important: {
+                  type: 'boolean',
+                  description: '중요한 파일 우선 순위 (기본값: true)',
+                  default: true
                 }
               },
               required: ['directory_path']
@@ -125,11 +163,18 @@ class FullContextInputMCPServer {
           case 'find_files':
             return await this.findFiles(args.pattern, args.workspace_path || '.');
           
+          case 'analyze_prompt_for_files':
+            return await this.analyzePromptForFiles(args.user_prompt, args.workspace_path || process.cwd());
+          
           case 'read_directory_context':
             return await this.readDirectoryContext(
               args.directory_path, 
               args.max_depth || 10, 
-              args.include_extensions
+              args.include_extensions,
+              args.max_files || 50,
+              args.max_file_size || 51200,
+              args.max_total_size || 512000,
+              args.prioritize_important !== false
             );
           
           default:
@@ -331,10 +376,18 @@ ${content}
           {
             type: 'text',
             text: JSON.stringify({
-              pattern: pattern,
-              workspace: workspacePath,
-              files: files,
-              count: files.length
+              directory: workspacePath,
+              total_files_found: files.length,
+              files_included: files.length,
+              files_skipped: 0,
+              total_context_size: 0,
+              max_limits: {
+                max_files: 50,
+                max_file_size: 51200,
+                max_total_size: 512000
+              },
+              files: files.map(file => ({ path: file })),
+              skipped_files: []
             }, null, 2)
           }
         ]
@@ -344,8 +397,8 @@ ${content}
     }
   }
 
-  // 디렉토리 컨텍스트 읽기 (재귀적으로 모든 코드 파일 읽기)
-  async readDirectoryContext(directoryPath, maxDepth = 10, includeExtensions = null) {
+  // 디렉토리 컨텍스트 읽기 (재귀적으로 모든 코드 파일 읽기) - 컨텍스트 초과 방지
+  async readDirectoryContext(directoryPath, maxDepth = 10, includeExtensions = null, maxFiles = 50, maxFileSize = 51200, maxTotalSize = 512000, prioritizeImportant = true) {
     try {
       const fullPath = path.resolve(directoryPath);
       
@@ -375,30 +428,43 @@ ${content}
       
       await this.collectFilesRecursively(fullPath, allFiles, directoryStructure, extensions, 0, maxDepth);
       
-      // 각 파일 내용 읽기
+      // 파일 우선순위 및 필터링
+      const processedFiles = this.prioritizeAndFilterFiles(allFiles, fullPath, maxFiles, maxFileSize, prioritizeImportant);
+      
+      // 각 파일 내용 읽기 (컨텍스트 초과 방지)
       const fileContents = [];
+      const skippedFiles = [];
       let totalSize = 0;
       
-      for (const file of allFiles) {
+      for (const fileInfo of processedFiles) {
         try {
-          const content = fs.readFileSync(file, 'utf8');
-          const fileStats = fs.statSync(file);
-          const relativePath = path.relative(fullPath, file);
+          // 최대 총 크기 검사
+          if (totalSize + fileInfo.size > maxTotalSize) {
+            skippedFiles.push({
+              path: fileInfo.relativePath,
+              size: fileInfo.size,
+              reason: `최대 총 컨텍스트 크기 초과 (${Math.round(maxTotalSize/1024)}KB 제한)`
+            });
+            continue;
+          }
+          
+          const content = fs.readFileSync(fileInfo.file, 'utf8');
           
           fileContents.push({
-            path: relativePath,
-            absolute_path: file,
-            size: fileStats.size,
-            modified: fileStats.mtime.toISOString(),
-            extension: path.extname(file).substring(1),
+            path: fileInfo.relativePath,
+            absolute_path: fileInfo.file,
+            size: fileInfo.size,
+            modified: fileInfo.modified,
+            extension: fileInfo.extension,
+            priority: fileInfo.priority,
             content: content
           });
           
-          totalSize += fileStats.size;
+          totalSize += fileInfo.size;
         } catch (error) {
           fileContents.push({
-            path: path.relative(fullPath, file),
-            absolute_path: file,
+            path: fileInfo.relativePath,
+            absolute_path: fileInfo.file,
             error: `파일 읽기 실패: ${error.message}`
           });
         }
@@ -476,12 +542,162 @@ ${content}
     
     structure.push(...currentLevel);
   }
-
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('FullContextInput MCP 서버가 시작되었습니다.');
+  
+  // 파일 우선순위 및 필터링
+  prioritizeAndFilterFiles(allFiles, basePath, maxFiles, maxFileSize, prioritizeImportant) {
+    const filesWithInfo = [];
+    
+    for (const file of allFiles) {
+      try {
+        const stats = fs.statSync(file);
+        const relativePath = path.relative(basePath, file);
+        const ext = path.extname(file).substring(1).toLowerCase();
+        
+        // 파일 크기 제한 확인
+        if (stats.size > maxFileSize) {
+          console.warn(`파일 크기 초과 건너뛰기: ${relativePath} (${Math.round(stats.size/1024)}KB > ${Math.round(maxFileSize/1024)}KB)`);
+          continue;
+        }
+        
+        // 우선순위 계산
+        let priority = 0;
+        if (prioritizeImportant) {
+          priority = this.calculateFilePriority(relativePath, ext, stats.size);
+        }
+        
+        filesWithInfo.push({
+          file: file,
+          relativePath: relativePath,
+          size: stats.size,
+          modified: stats.mtime.toISOString(),
+          extension: ext,
+          priority: priority
+        });
+      } catch (error) {
+        console.warn(`파일 정보 읽기 실패: ${file} - ${error.message}`);
+      }
+    }
+    
+    // 우선순위에 따라 정렬 및 개수 제한
+    if (prioritizeImportant) {
+      filesWithInfo.sort((a, b) => b.priority - a.priority);
+    }
+    
+    return filesWithInfo.slice(0, maxFiles);
   }
+  
+  // 파일 우선순위 계산
+  calculateFilePriority(relativePath, extension, size) {
+    let priority = 0;
+    const fileName = path.basename(relativePath).toLowerCase();
+    const dirName = path.dirname(relativePath).toLowerCase();
+    
+    // 중요한 파일명 가점
+    const importantFiles = ['index', 'main', 'app', 'config', 'package', 'readme'];
+    if (importantFiles.some(name => fileName.includes(name))) {
+      priority += 50;
+    }
+    
+    // 중요한 디렉토리 가점
+    const importantDirs = ['src', 'lib', 'components', 'utils', 'api', 'routes'];
+    if (importantDirs.some(dir => dirName.includes(dir))) {
+      priority += 30;
+    }
+    
+    // 파일 확장자별 가점
+    const extensionPriority = {
+      'js': 20, 'ts': 20, 'jsx': 18, 'tsx': 18, 'vue': 18,
+      'py': 15, 'java': 15, 'cpp': 15, 'c': 15, 'h': 15,
+      'css': 10, 'scss': 10, 'html': 10, 'json': 8, 'md': 5
+    };
+    priority += extensionPriority[extension] || 0;
+    
+    // 파일 크기 가점 (작을수록 좋음)
+    if (size < 1024) priority += 10;      // 1KB 미만
+    else if (size < 10240) priority += 5; // 10KB 미만
+    else if (size > 51200) priority -= 10; // 50KB 초과
+    
+    return priority;
+  }
+
+  // 프롬프트 분석 및 자동 파일/디렉토리 감지
+  async analyzePromptForFiles(userPrompt, workspacePath) {
+  try {
+    const analysis = {
+      detected_files: [],
+      detected_directories: [],
+      suggested_actions: [],
+      confidence_score: 0
+    };
+
+    // 파일 패턴 감지
+    const filePatterns = this.extractFilePatterns(userPrompt);
+    const directoryPatterns = this.extractDirectoryPatterns(userPrompt);
+    
+    // 추가 키워드 기반 감지
+    const keywords = {
+      directory_analysis: ['분석해줘', '확인해줘', '살펴봐', '검토해줘', '디렉토리', '폴더', '프로젝트'],
+      file_read: ['파일', '코드', '내용', '소스'],
+      exclude_patterns: ['node_modules', '.git', 'dist', 'build']
+    };
+
+    let confidence = 0;
+    const suggestions = [];
+
+    // 디렉토리 분석 요청 감지
+    if (keywords.directory_analysis.some(keyword => userPrompt.includes(keyword))) {
+      confidence += 30;
+      
+      // 디렉토리 패턴이 있으면 우선 사용
+      if (directoryPatterns.length > 0) {
+        analysis.detected_directories = directoryPatterns;
+        confidence += 40;
+        suggestions.push({
+          action: 'read_directory_context',
+          target: directoryPatterns[0],
+          reason: '디렉토리 분석 요청 감지'
+        });
+      } else {
+        // 현재 디렉토리 분석 제안
+        analysis.detected_directories = [workspacePath];
+        confidence += 20;
+        suggestions.push({
+          action: 'read_directory_context',
+          target: workspacePath,
+          reason: '현재 디렉토리 분석 제안'
+        });
+      }
+    }
+
+    // 파일 읽기 요청 감지
+    if (filePatterns.length > 0) {
+      analysis.detected_files = filePatterns;
+      confidence += 50;
+      suggestions.push({
+        action: 'read_file_content',
+        target: filePatterns[0],
+        reason: '파일 경로 감지'
+      });
+    }
+
+    analysis.confidence_score = Math.min(confidence, 100);
+    analysis.suggested_actions = suggestions;
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(analysis, null, 2)
+      }]
+    };
+  } catch (error) {
+    throw new Error(`프롬프트 분석 실패: ${error.message}`);
+  }
+}
+
+async run() {
+  const transport = new StdioServerTransport();
+  await this.server.connect(transport);
+  console.error('FullContextInput MCP 서버가 시작되었습니다.');
 }
 
 const server = new FullContextInputMCPServer();
