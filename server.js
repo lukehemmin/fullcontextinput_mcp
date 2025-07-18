@@ -16,7 +16,7 @@ class FullContextInputMCPServer {
   constructor() {
     this.server = new Server({
       name: 'fullcontextinput_mcp',
-      version: '1.0.1',
+      version: '1.0.2',
     }, {
       capabilities: {
         tools: {},
@@ -24,7 +24,74 @@ class FullContextInputMCPServer {
       },
     });
 
+    // Rate Limiting 설정
+    this.rateLimiter = {
+      lastRequestTime: 0,
+      minDelay: 1000, // 최소 1초 대기
+      requestCount: 0,
+      resetTime: Date.now() + 60000 // 1분마다 리셋
+    };
+    
+    // 파일 캐시 (중복 요청 방지)
+    this.fileCache = new Map();
+    this.cacheTimeout = 30000; // 30초 캐시
+
     this.setupHandlers();
+  }
+
+  // Rate Limiting 및 지연 처리
+  async waitForRateLimit() {
+    const now = Date.now();
+    
+    // 1분마다 카운터 리셋
+    if (now > this.rateLimiter.resetTime) {
+      this.rateLimiter.requestCount = 0;
+      this.rateLimiter.resetTime = now + 60000;
+    }
+    
+    // 요청 수 증가
+    this.rateLimiter.requestCount++;
+    
+    // 최소 대기 시간 계산
+    const timeSinceLastRequest = now - this.rateLimiter.lastRequestTime;
+    let delayNeeded = this.rateLimiter.minDelay - timeSinceLastRequest;
+    
+    // 요청이 많을수록 더 오래 대기
+    if (this.rateLimiter.requestCount > 10) {
+      delayNeeded = Math.max(delayNeeded, 2000); // 2초
+    } else if (this.rateLimiter.requestCount > 5) {
+      delayNeeded = Math.max(delayNeeded, 1500); // 1.5초
+    }
+    
+    if (delayNeeded > 0) {
+      console.warn(`Rate limit 방지를 위해 ${delayNeeded}ms 대기 중...`);
+      await new Promise(resolve => setTimeout(resolve, delayNeeded));
+    }
+    
+    this.rateLimiter.lastRequestTime = Date.now();
+  }
+  
+  // 파일 캐시 검사
+  getCachedFile(filePath) {
+    const cached = this.fileCache.get(filePath);
+    if (cached && (Date.now() - cached.timestamp < this.cacheTimeout)) {
+      return cached.content;
+    }
+    return null;
+  }
+  
+  // 파일 캐시 저장
+  setCachedFile(filePath, content) {
+    this.fileCache.set(filePath, {
+      content: content,
+      timestamp: Date.now()
+    });
+    
+    // 캐시 크기 제한 (100개)
+    if (this.fileCache.size > 100) {
+      const firstKey = this.fileCache.keys().next().value;
+      this.fileCache.delete(firstKey);
+    }
   }
 
   setupHandlers() {
@@ -337,13 +404,22 @@ class FullContextInputMCPServer {
     }
   }
 
-  // 파일 내용 읽기
+  // 파일 내용 읽기 (Rate Limiting 적용)
   async readFileContent(filePath) {
     try {
+      // Rate Limiting 대기
+      await this.waitForRateLimit();
+      
+      // 캐시 확인
+      const cached = this.getCachedFile(filePath);
+      if (cached) {
+        console.log(`캐시된 파일 사용: ${filePath}`);
+        return cached;
+      }
       const content = fs.readFileSync(filePath, 'utf8');
       const stats = fs.statSync(filePath);
       
-      return {
+      const result = {
         content: [
           {
             type: 'text',
@@ -357,6 +433,11 @@ ${content}
           }
         ]
       };
+      
+      // 결과 캐시 저장
+      this.setCachedFile(filePath, result);
+      
+      return result;
     } catch (error) {
       throw new Error(`파일을 읽을 수 없습니다: ${filePath} - ${error.message}`);
     }
@@ -400,6 +481,9 @@ ${content}
   // 디렉토리 컨텍스트 읽기 (재귀적으로 모든 코드 파일 읽기) - 컨텍스트 초과 방지
   async readDirectoryContext(directoryPath, maxDepth = 10, includeExtensions = null, maxFiles = 50, maxFileSize = 51200, maxTotalSize = 512000, prioritizeImportant = true) {
     try {
+      // Rate Limiting 대기 (디렉토리는 더 오래 대기)
+      await this.waitForRateLimit();
+      await new Promise(resolve => setTimeout(resolve, 500)); // 추가 0.5초 대기
       const fullPath = path.resolve(directoryPath);
       
       // 기본 코드 파일 확장자
@@ -622,82 +706,83 @@ ${content}
 
   // 프롬프트 분석 및 자동 파일/디렉토리 감지
   async analyzePromptForFiles(userPrompt, workspacePath) {
-  try {
-    const analysis = {
-      detected_files: [],
-      detected_directories: [],
-      suggested_actions: [],
-      confidence_score: 0
-    };
+    try {
+      const analysis = {
+        detected_files: [],
+        detected_directories: [],
+        suggested_actions: [],
+        confidence_score: 0
+      };
 
-    // 파일 패턴 감지
-    const filePatterns = this.extractFilePatterns(userPrompt);
-    const directoryPatterns = this.extractDirectoryPatterns(userPrompt);
-    
-    // 추가 키워드 기반 감지
-    const keywords = {
-      directory_analysis: ['분석해줘', '확인해줘', '살펴봐', '검토해줘', '디렉토리', '폴더', '프로젝트'],
-      file_read: ['파일', '코드', '내용', '소스'],
-      exclude_patterns: ['node_modules', '.git', 'dist', 'build']
-    };
-
-    let confidence = 0;
-    const suggestions = [];
-
-    // 디렉토리 분석 요청 감지
-    if (keywords.directory_analysis.some(keyword => userPrompt.includes(keyword))) {
-      confidence += 30;
+      // 파일 패턴 감지
+      const filePatterns = this.extractFilePatterns(userPrompt);
+      const directoryPatterns = this.extractDirectoryPatterns(userPrompt);
       
-      // 디렉토리 패턴이 있으면 우선 사용
-      if (directoryPatterns.length > 0) {
-        analysis.detected_directories = directoryPatterns;
-        confidence += 40;
+      // 추가 키워드 기반 감지
+      const keywords = {
+        directory_analysis: ['분석해줘', '확인해줘', '살펴봐', '검토해줘', '디렉토리', '폴더', '프로젝트'],
+        file_read: ['파일', '코드', '내용', '소스'],
+        exclude_patterns: ['node_modules', '.git', 'dist', 'build']
+      };
+
+      let confidence = 0;
+      const suggestions = [];
+
+      // 디렉토리 분석 요청 감지
+      if (keywords.directory_analysis.some(keyword => userPrompt.includes(keyword))) {
+        confidence += 30;
+        
+        // 디렉토리 패턴이 있으면 우선 사용
+        if (directoryPatterns.length > 0) {
+          analysis.detected_directories = directoryPatterns;
+          confidence += 40;
+          suggestions.push({
+            action: 'read_directory_context',
+            target: directoryPatterns[0],
+            reason: '디렉토리 분석 요청 감지'
+          });
+        } else {
+          // 현재 디렉토리 분석 제안
+          analysis.detected_directories = [workspacePath];
+          confidence += 20;
+          suggestions.push({
+            action: 'read_directory_context',
+            target: workspacePath,
+            reason: '현재 디렉토리 분석 제안'
+          });
+        }
+      }
+
+      // 파일 읽기 요청 감지
+      if (filePatterns.length > 0) {
+        analysis.detected_files = filePatterns;
+        confidence += 50;
         suggestions.push({
-          action: 'read_directory_context',
-          target: directoryPatterns[0],
-          reason: '디렉토리 분석 요청 감지'
-        });
-      } else {
-        // 현재 디렉토리 분석 제안
-        analysis.detected_directories = [workspacePath];
-        confidence += 20;
-        suggestions.push({
-          action: 'read_directory_context',
-          target: workspacePath,
-          reason: '현재 디렉토리 분석 제안'
+          action: 'read_file_content',
+          target: filePatterns[0],
+          reason: '파일 경로 감지'
         });
       }
+
+      analysis.confidence_score = Math.min(confidence, 100);
+      analysis.suggested_actions = suggestions;
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(analysis, null, 2)
+        }]
+      };
+    } catch (error) {
+      throw new Error(`프롬프트 분석 실패: ${error.message}`);
     }
-
-    // 파일 읽기 요청 감지
-    if (filePatterns.length > 0) {
-      analysis.detected_files = filePatterns;
-      confidence += 50;
-      suggestions.push({
-        action: 'read_file_content',
-        target: filePatterns[0],
-        reason: '파일 경로 감지'
-      });
-    }
-
-    analysis.confidence_score = Math.min(confidence, 100);
-    analysis.suggested_actions = suggestions;
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(analysis, null, 2)
-      }]
-    };
-  } catch (error) {
-    throw new Error(`프롬프트 분석 실패: ${error.message}`);
   }
-}
 
-async run() {
-  const transport = new StdioServerTransport();
-  await this.server.connect(transport);
-  console.error('FullContextInput MCP 서버가 시작되었습니다.');
+  async run() {
+    const transport = new StdioServerTransport();
+    await this.server.connect(transport);
+    console.error('FullContextInput MCP 서버가 시작되었습니다.');
+  }
 }
 
 const server = new FullContextInputMCPServer();
