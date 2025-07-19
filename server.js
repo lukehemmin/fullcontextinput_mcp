@@ -228,7 +228,7 @@ class FullContextInputMCPServer {
           },
           {
             name: 'read_file_chunk',
-            description: '큰 파일을 지정된 바이트 범위로 나눠서 읽습니다.',
+            description: '큰 파일을 라인 단위로 안전하게 나눠서 읽습니다. (코드 깨짐 방지)',
             inputSchema: {
               type: 'object',
               properties: {
@@ -236,10 +236,10 @@ class FullContextInputMCPServer {
                   type: 'string',
                   description: '읽을 파일의 경로'
                 },
-                chunk_size: {
+                lines_per_chunk: {
                   type: 'integer',
-                  description: '청크 크기 (bytes, 기본값: 10KB)',
-                  default: 10240
+                  description: '청크당 라인 수 (기본값: 200줄)',
+                  default: 200
                 },
                 chunk_number: {
                   type: 'integer',
@@ -316,7 +316,7 @@ class FullContextInputMCPServer {
           case 'read_file_chunk':
             return await this.readFileChunk(
               args.file_path,
-              args.chunk_size || 10240,
+              args.lines_per_chunk || 200,
               args.chunk_number || 0
             );
           
@@ -534,8 +534,8 @@ ${first200Lines.join('\n')}
 ${remainingLines > 0 ? `💡 다음 200줄을 읽으려면:
 read_file_lines(file_path="${filePath}", start_line=201, end_line=400)
 
-또는 특정 부분을 찾으려면:
-read_file_lines(file_path="${filePath}", start_line=시작줄, end_line=끝줄)` : '🎉 파일을 모두 읽었습니다!'}`
+또는 스마트 청크로 읽으려면:
+read_file_chunk(file_path="${filePath}", lines_per_chunk=200, chunk_number=1)` : '🎉 파일을 모두 읽었습니다!'}`
             }
           ]
         };
@@ -560,7 +560,7 @@ ${content}
 
 🔍 만약 위 내용이 잘렸다면:
 - read_file_lines(file_path="${filePath}", start_line=1, end_line=200) // 200줄씩
-- read_file_chunk(file_path="${filePath}", chunk_number=0) // 10KB씩`
+- read_file_chunk(file_path="${filePath}", lines_per_chunk=200, chunk_number=0) // 스마트 청크`
             }
           ]
         };
@@ -979,45 +979,48 @@ ${isLarge ?
     }
   }
 
-  // 파일 청크 단위로 읽기
-  async readFileChunk(filePath, chunkSize = 10240, chunkNumber = 0) {
+  // 파일 스마트 청크 단위로 읽기 (라인 경계 조정)
+  async readFileChunk(filePath, linesPerChunk = 200, chunkNumber = 0) {
     try {
       await this.waitForRateLimit();
       
       const stats = fs.statSync(filePath);
-      const totalSize = stats.size;
-      const totalChunks = Math.ceil(totalSize / chunkSize);
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+      const totalChunks = Math.ceil(totalLines / linesPerChunk);
       
       if (chunkNumber >= totalChunks) {
         throw new Error(`청크 번호가 범위를 벗어났습니다. 총 청크 수: ${totalChunks}, 요청한 청크: ${chunkNumber}`);
       }
       
-      const startByte = chunkNumber * chunkSize;
-      const endByte = Math.min(startByte + chunkSize - 1, totalSize - 1);
+      const startLine = chunkNumber * linesPerChunk;
+      const endLine = Math.min(startLine + linesPerChunk - 1, totalLines - 1);
       
-      // 파일의 특정 범위만 읽기
-      const buffer = Buffer.alloc(endByte - startByte + 1);
-      const fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, buffer, 0, buffer.length, startByte);
-      fs.closeSync(fd);
-      
-      const content = buffer.toString('utf8');
+      // 라인 범위로 안전하게 자르기
+      const chunkLines = lines.slice(startLine, endLine + 1);
+      const chunkContent = chunkLines.join('\n');
+      const chunkSizeKB = Math.round(Buffer.byteLength(chunkContent, 'utf8') / 1024);
       
       return {
         content: [
           {
             type: 'text',
             text: `파일: ${filePath}
-총 크기: ${totalSize} bytes (${Math.round(totalSize/1024)}KB)
-청크 정보: ${chunkNumber + 1}/${totalChunks} (${Math.round(chunkSize/1024)}KB씩)
-바이트 범위: ${startByte}-${endByte}
+총 크기: ${stats.size} bytes (${Math.round(stats.size/1024)}KB)
+총 라인: ${totalLines}
+청크 정보: ${chunkNumber + 1}/${totalChunks} (${linesPerChunk}줄씩)
+라인 범위: ${startLine + 1}-${endLine + 1} (이 청크 크기: ${chunkSizeKB}KB)
 
-=== 청크 ${chunkNumber + 1} 내용 ===
-${content}
+✅ 스마트 청크 모드 (라인 경계 조정)
+코드가 중간에 잘리지 않도록 라인 단위로 안전하게 분할합니다.
+
+=== 청크 ${chunkNumber + 1} (라인 ${startLine + 1}-${endLine + 1}) ===
+${chunkContent}
 === 청크 끝 ===
 
-💡 다음 청크를 읽으려면:
-read_file_chunk(file_path="${filePath}", chunk_number=${chunkNumber + 1})`
+${chunkNumber + 1 < totalChunks ? `💡 다음 청크를 읽으려면:
+read_file_chunk(file_path="${filePath}", lines_per_chunk=${linesPerChunk}, chunk_number=${chunkNumber + 1})` : '🎉 모든 청크를 읽었습니다!'}`
           }
         ]
       };
