@@ -16,7 +16,7 @@ class FullContextInputMCPServer {
   constructor() {
     this.server = new Server({
       name: 'fullcontextinput_mcp',
-      version: '1.0.2',
+      version: '1.0.4',
     }, {
       capabilities: {
         tools: {},
@@ -211,6 +211,72 @@ class FullContextInputMCPServer {
               },
               required: ['directory_path']
             }
+          },
+          {
+            name: 'get_file_info',
+            description: '파일의 기본 정보만 확인합니다. (크기, 수정일, 줄 수 등, 내용 제외)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '확인할 파일의 경로'
+                }
+              },
+              required: ['file_path']
+            }
+          },
+          {
+            name: 'read_file_chunk',
+            description: '큰 파일을 지정된 바이트 범위로 나눠서 읽습니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '읽을 파일의 경로'
+                },
+                chunk_size: {
+                  type: 'integer',
+                  description: '청크 크기 (bytes, 기본값: 10KB)',
+                  default: 10240
+                },
+                chunk_number: {
+                  type: 'integer',
+                  description: '읽을 청크 번호 (0부터 시작)',
+                  default: 0
+                }
+              },
+              required: ['file_path']
+            }
+          },
+          {
+            name: 'read_file_lines',
+            description: '파일의 지정된 라인 범위만 읽습니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '읽을 파일의 경로'
+                },
+                start_line: {
+                  type: 'integer',
+                  description: '시작 라인 번호 (1부터 시작)',
+                  default: 1
+                },
+                end_line: {
+                  type: 'integer',
+                  description: '끝 라인 번호 (비어있으면 파일 끝까지)'
+                },
+                max_lines: {
+                  type: 'integer',
+                  description: '최대 라인 수 (기본값: 100)',
+                  default: 100
+                }
+              },
+              required: ['file_path']
+            }
           }
         ]
       };
@@ -242,6 +308,24 @@ class FullContextInputMCPServer {
               args.max_file_size || 51200,
               args.max_total_size || 512000,
               args.prioritize_important !== false
+            );
+          
+          case 'get_file_info':
+            return await this.getFileInfo(args.file_path);
+          
+          case 'read_file_chunk':
+            return await this.readFileChunk(
+              args.file_path,
+              args.chunk_size || 10240,
+              args.chunk_number || 0
+            );
+          
+          case 'read_file_lines':
+            return await this.readFileLines(
+              args.file_path,
+              args.start_line || 1,
+              args.end_line,
+              args.max_lines || 100
             );
           
           default:
@@ -404,7 +488,7 @@ class FullContextInputMCPServer {
     }
   }
 
-  // 파일 내용 읽기 (Rate Limiting 적용)
+  // 파일 내용 읽기 (Rate Limiting 적용, 큰 파일 감지)
   async readFileContent(filePath) {
     try {
       // Rate Limiting 대기
@@ -416,23 +500,92 @@ class FullContextInputMCPServer {
         console.log(`캐시된 파일 사용: ${filePath}`);
         return cached;
       }
-      const content = fs.readFileSync(filePath, 'utf8');
-      const stats = fs.statSync(filePath);
       
-      const result = {
-        content: [
-          {
-            type: 'text',
-            text: `파일: ${filePath}
-크기: ${stats.size} bytes
+      const stats = fs.statSync(filePath);
+      const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+      const totalLines = lines.length;
+      
+      // 지능형 파일 읽기 전략
+      const sizeKB = Math.round(stats.size / 1024);
+      
+      let result;
+      
+      if (stats.size > 20480) { // 20KB 초과
+        // 매우 큰 파일: 바로 200줄씩 분할 제공
+        const first200Lines = lines.slice(0, 200);
+        const remainingLines = totalLines - 200;
+        
+        result = {
+          content: [
+            {
+              type: 'text',
+              text: `파일: ${filePath}
+크기: ${stats.size} bytes (${sizeKB}KB)
+라인 수: ${totalLines}
 수정일: ${stats.mtime.toISOString()}
 
-=== 파일 내용 ===
+🤖 지능형 대용량 파일 읽기 모드
+파일이 ${sizeKB}KB로 커서 200줄씩 자동 분할하여 제공합니다.
+
+=== 1-200줄 (${remainingLines > 0 ? `남은 줄: ${remainingLines}` : '마지막'}) ===
+${first200Lines.join('\n')}
+=== 200줄 단위 완료 ===
+
+${remainingLines > 0 ? `💡 다음 200줄을 읽으려면:
+read_file_lines(file_path="${filePath}", start_line=201, end_line=400)
+
+또는 특정 부분을 찾으려면:
+read_file_lines(file_path="${filePath}", start_line=시작줄, end_line=끝줄)` : '🎉 파일을 모두 읽었습니다!'}`
+            }
+          ]
+        };
+      } else if (stats.size > 10240 || totalLines > 200) { // 10KB 초과 또는 200줄 초과
+        // 중간 크기 파일: 전체 제공 + 완독 체크 마커
+        const content = lines.join('\n');
+        result = {
+          content: [
+            {
+              type: 'text',
+              text: `파일: ${filePath}
+크기: ${stats.size} bytes (${sizeKB}KB)
+라인 수: ${totalLines}
+수정일: ${stats.mtime.toISOString()}
+
+📜 중간 크기 파일 완전 제공 모드
+이 파일은 ${sizeKB}KB, ${totalLines}줄입니다. 전체 내용을 제공합니다.
+
+=== 파일 전체 내용 ===
 ${content}
-=== 파일 내용 끝 ===`
-          }
-        ]
-      };
+=== 파일 완료 (${totalLines}/${totalLines} 라인) FULL_FILE_READ_COMPLETE ===
+
+🔍 만약 위 내용이 잘렸다면:
+- read_file_lines(file_path="${filePath}", start_line=1, end_line=200) // 200줄씩
+- read_file_chunk(file_path="${filePath}", chunk_number=0) // 10KB씩`
+            }
+          ]
+        };
+      } else {
+        // 작은 파일: 전체 제공 + 완독 마커
+        const content = lines.join('\n');
+        result = {
+          content: [
+            {
+              type: 'text',
+              text: `파일: ${filePath}
+크기: ${stats.size} bytes (${sizeKB}KB)
+라인 수: ${totalLines}
+수정일: ${stats.mtime.toISOString()}
+
+✅ 소형 파일 완전 제공
+이 파일은 ${sizeKB}KB, ${totalLines}줄로 완전히 읽을 수 있습니다.
+
+=== 파일 전체 내용 ===
+${content}
+=== 파일 완료 (${totalLines}/${totalLines} 라인) FULL_FILE_READ_COMPLETE ===`
+            }
+          ]
+        };
+      }
       
       // 결과 캐시 저장
       this.setCachedFile(filePath, result);
@@ -775,6 +928,154 @@ ${content}
       };
     } catch (error) {
       throw new Error(`프롬프트 분석 실패: ${error.message}`);
+    }
+  }
+
+  // 파일 정보만 확인 (내용 제외)
+  async getFileInfo(filePath) {
+    try {
+      await this.waitForRateLimit();
+      
+      const stats = fs.statSync(filePath);
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+      
+      // 파일 형식 정보
+      const ext = path.extname(filePath).substring(1).toLowerCase();
+      const sizeKB = Math.round(stats.size / 1024 * 10) / 10; // 소수점 1자리
+      
+      // 큰 파일 여부 판단
+      const isLarge = stats.size > 15360 || totalLines > 300;
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `파일 정보: ${filePath}
+
+✅ 기본 정보:
+- 파일 크기: ${stats.size} bytes (${sizeKB}KB)
+- 라인 수: ${totalLines} lines
+- 파일 형식: ${ext || '확장자 없음'}
+- 수정일: ${stats.mtime.toISOString()}
+- 생성일: ${stats.birthtime.toISOString()}
+
+📊 읽기 권장사항:
+${isLarge ? 
+  `⚠️ 큰 파일 (${sizeKB}KB, ${totalLines}줄)\n- read_file_lines 사용 권장 (예: 1-100줄)\n- read_file_chunk 사용 권장 (10KB씩)` : 
+  `✅ 작은 파일\n- read_file_content로 전체 읽기 가능`
+}
+
+🔧 사용 가능한 도구:
+- read_file_content: 전체 파일 읽기 ${isLarge ? '(큰 파일은 잘릴 수 있음)' : '(권장)'}
+- read_file_lines: 라인 범위 지정 읽기 ${isLarge ? '(권장)' : ''}
+- read_file_chunk: 청크 단위 읽기 ${isLarge ? '(권장)' : ''}`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`파일 정보 확인 실패: ${filePath} - ${error.message}`);
+    }
+  }
+
+  // 파일 청크 단위로 읽기
+  async readFileChunk(filePath, chunkSize = 10240, chunkNumber = 0) {
+    try {
+      await this.waitForRateLimit();
+      
+      const stats = fs.statSync(filePath);
+      const totalSize = stats.size;
+      const totalChunks = Math.ceil(totalSize / chunkSize);
+      
+      if (chunkNumber >= totalChunks) {
+        throw new Error(`청크 번호가 범위를 벗어났습니다. 총 청크 수: ${totalChunks}, 요청한 청크: ${chunkNumber}`);
+      }
+      
+      const startByte = chunkNumber * chunkSize;
+      const endByte = Math.min(startByte + chunkSize - 1, totalSize - 1);
+      
+      // 파일의 특정 범위만 읽기
+      const buffer = Buffer.alloc(endByte - startByte + 1);
+      const fd = fs.openSync(filePath, 'r');
+      fs.readSync(fd, buffer, 0, buffer.length, startByte);
+      fs.closeSync(fd);
+      
+      const content = buffer.toString('utf8');
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `파일: ${filePath}
+총 크기: ${totalSize} bytes (${Math.round(totalSize/1024)}KB)
+청크 정보: ${chunkNumber + 1}/${totalChunks} (${Math.round(chunkSize/1024)}KB씩)
+바이트 범위: ${startByte}-${endByte}
+
+=== 청크 ${chunkNumber + 1} 내용 ===
+${content}
+=== 청크 끝 ===
+
+💡 다음 청크를 읽으려면:
+read_file_chunk(file_path="${filePath}", chunk_number=${chunkNumber + 1})`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`파일 청크 읽기 실패: ${filePath} - ${error.message}`);
+    }
+  }
+
+  // 파일의 특정 라인 범위 읽기
+  async readFileLines(filePath, startLine = 1, endLine = null, maxLines = 100) {
+    try {
+      await this.waitForRateLimit();
+      
+      const stats = fs.statSync(filePath);
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+      
+      // 라인 번호 유효성 검사
+      if (startLine < 1) startLine = 1;
+      if (startLine > totalLines) {
+        throw new Error(`시작 라인이 파일 라인 수를 초과했습니다. 파일 총 라인 수: ${totalLines}`);
+      }
+      
+      // 끝 라인 계산
+      let actualEndLine = endLine || Math.min(startLine + maxLines - 1, totalLines);
+      actualEndLine = Math.min(actualEndLine, totalLines);
+      
+      // maxLines 제한 적용
+      if (actualEndLine - startLine + 1 > maxLines) {
+        actualEndLine = startLine + maxLines - 1;
+      }
+      
+      const selectedLines = lines.slice(startLine - 1, actualEndLine);
+      const selectedContent = selectedLines.join('\n');
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `파일: ${filePath}
+총 크기: ${stats.size} bytes (${Math.round(stats.size/1024)}KB)
+총 라인 수: ${totalLines}
+표시 범위: ${startLine}-${actualEndLine} (${actualEndLine - startLine + 1}줄)
+
+=== 라인 ${startLine}-${actualEndLine} ===
+${selectedContent}
+=== 라인 범위 끝 ===
+
+💡 다른 라인을 읽으려면:
+${actualEndLine < totalLines ? `- read_file_lines(file_path="${filePath}", start_line=${actualEndLine + 1}, end_line=${Math.min(actualEndLine + maxLines, totalLines)})` : '- 파일의 모든 라인을 읽었습니다.'}
+- read_file_lines(file_path="${filePath}", start_line=1, end_line=${Math.min(100, totalLines)}) // 처음 100줄
+- read_file_lines(file_path="${filePath}", start_line=${Math.max(1, totalLines - 99)}, end_line=${totalLines}) // 마지막 100줄`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`파일 라인 읽기 실패: ${filePath} - ${error.message}`);
     }
   }
 
