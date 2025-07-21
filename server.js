@@ -1321,18 +1321,22 @@ ${content}
             text: `파일: ${filePath}
 총 크기: ${stats.size} bytes (${Math.round(stats.size/1024)}KB)
 총 라인: ${totalLines}
-청크 정보: ${chunkNumber + 1}/${totalChunks} (${linesPerChunk}줄씩)
+
+📊 ${chunkNumber + 1}/${totalChunks} 청크 (${linesPerChunk}줄씩 분할)
 라인 범위: ${startLine + 1}-${endLine + 1} (이 청크 크기: ${chunkSizeKB}KB)
 
-🤖 지능형 파일 읽기 (큰 파일 자동 청크)
-200줄 이상 파일이므로 청크 단위로 제공합니다.
+🤖 지능형 파일 읽기 - 큰 파일 자동 청킹
+200줄 이상 파일이므로 안전한 청크 단위로 제공합니다.
 
-=== 청크 ${chunkNumber + 1} (라인 ${startLine + 1}-${endLine + 1}) ===
+=== ${chunkNumber + 1}/${totalChunks} 청크 시작 (라인 ${startLine + 1}-${endLine + 1}) ===
 ${chunkContent}
-=== 청크 끝 ===
+=== ${chunkNumber + 1}/${totalChunks} 청크 완료 ===
 
-${chunkNumber + 1 < totalChunks ? `💡 다음 청크를 읽으려면:
-read_file_smart(file_path="${filePath}", chunk_number=${chunkNumber + 1})` : '🎉 모든 청크를 읽었습니다!'}`
+${chunkNumber + 1 < totalChunks ? 
+`⚠️  아직 ${totalChunks - (chunkNumber + 1)}개 청크가 더 남았습니다!
+🔄 다음 청크 읽기: read_file_smart("${filePath}", ${chunkNumber + 1})
+📋 남은 청크: ${chunkNumber + 2}/${totalChunks}, ${chunkNumber + 3}/${totalChunks}${totalChunks > chunkNumber + 3 ? ', ...' : ''}` : 
+'🎉 모든 청크를 완전히 읽었습니다! 파일 분석 완료.'}`
           }
         ]
       };

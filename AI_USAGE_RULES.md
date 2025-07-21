@@ -40,16 +40,29 @@
 - **자동 판단**: 200줄 이하 → 전체 / 200줄 초과 → 청크
 - **언제**: 개별 파일 읽기가 필요할 때 **우선 사용**
 - **장점**: 컨텍스트 초과 방지, 완전한 코드 읽기
+- **⚠️ 중요**: 청크 파일은 **반드시 모든 청크를 순차적으로 읽어야 함**
 
 ```bash
-# 작은 파일 → 전체 제공
+# 작은 파일 → 전체 제공 (완료)
 @fullcontextinput_mcp read_file_smart /project/config.js
 
-# 큰 파일 → 자동 청크 (첫 번째)
-@fullcontextinput_mcp read_file_smart /project/large_file.js
-
-# 큰 파일 → 특정 청크
+# 큰 파일 → 첫 청크부터 시작
+@fullcontextinput_mcp read_file_smart /project/large_file.js 0
+# ↓ 청크 정보 확인 후 자동으로 나머지도 읽기
 @fullcontextinput_mcp read_file_smart /project/large_file.js 1
+@fullcontextinput_mcp read_file_smart /project/large_file.js 2
+# ... 모든 청크 완료까지
+```
+
+##### 🚨 **청크 읽기 필수 규칙**
+```
+IF 파일이 청크로 나뉜다면:
+  1. 첫 청크 읽기
+  2. 응답에서 "청크 정보: 1/N" 확인
+  3. N개 청크 모두 자동으로 순차 읽기
+  4. 마지막 청크까지 완료 확인
+  
+NEVER 첫 청크만 읽고 멈추기!
 ```
 
 ### 🔧 **기존 도구들** (여전히 유용)
@@ -137,6 +150,21 @@
    @fullcontextinput_mcp read_directory_structure /large_project
    ```
 
+3. **🚨 가장 심각한 문제: 청크 파일 불완전 읽기**
+   ```bash
+   # ❌ 치명적 실수 - 첫 청크만 읽고 멈춤
+   @fullcontextinput_mcp read_file_smart /large_file.js 0
+   # → "완료"라고 생각하고 끝내기 ❌❌❌
+   
+   # ✅ 올바른 방법 - 모든 청크 순차 읽기
+   @fullcontextinput_mcp read_file_smart /large_file.js 0  # 1/4 청크
+   @fullcontextinput_mcp read_file_smart /large_file.js 1  # 2/4 청크
+   @fullcontextinput_mcp read_file_smart /large_file.js 2  # 3/4 청크
+   @fullcontextinput_mcp read_file_smart /large_file.js 3  # 4/4 청크 ✅
+   ```
+   
+   **❗ 기억하세요**: 청크 정보에서 "1/4"를 보면 **반드시 4개 모두** 읽어야 합니다!
+
 ### ⚡ **최적화 팁**
 
 1. **200줄 기준 활용**: `read_file_smart`의 자동 판단 신뢰
@@ -200,8 +228,20 @@
 
 1. **🥇 1순위**: `read_directory_structure`로 구조 파악
 2. **🥈 2순위**: `read_file_smart`로 개별 파일 읽기  
-3. **🚫 금지**: 구조 파악 없이 무작정 파일 읽기
-4. **⚡ 자동화**: 200줄 기준 자동 전체/청크 판단
-5. **🛡️ 안전성**: 컨텍스트 초과 없는 완전한 코드 읽기
+3. **🚨 최중요**: 청크 파일은 **모든 청크를 순차적으로 완전히** 읽기
+4. **🚫 금지**: 구조 파악 없이 무작정 파일 읽기
+5. **⚡ 자동화**: 200줄 기준 자동 전체/청크 판단
+6. **🛡️ 안전성**: 컨텍스트 초과 없는 완전한 코드 읽기
+
+### 🚨 **청크 읽기 체크리스트**
+```
+☐ 첫 청크 읽음
+☐ "청크 정보: 1/N" 확인
+☐ 2번째 청크 읽음
+☐ 3번째 청크 읽음
+☐ ...
+☐ N번째(마지막) 청크 읽음
+☐ "파일 완전 읽기 완료" 확인
+```
 
 **이 규칙을 따르면 어떤 크기의 프로젝트도 효율적으로 분석할 수 있습니다!** 🚀
