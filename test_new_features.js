@@ -51,12 +51,94 @@ class NewFeaturesTester {
 
     // 파일 읽기 함수들 구문 검사
     testFunctionSyntax() {
-        console.log('\n=== 새로운 함수들 구문 검사 ===');
+        console.log('\n=== 새로운 MCP 도구들 구문 검사 ===');
+        
+        const serverCode = fs.readFileSync('server.js', 'utf8');
+        
+        // 새 도구들 존재 확인
+        const newTools = [
+            'read_directory_structure',
+            'read_file_smart'
+        ];
+        
+        for (const toolName of newTools) {
+            const hasToolDefinition = serverCode.includes(`name: '${toolName}'`);
+            const hasHandler = serverCode.includes(`case '${toolName}'`);
+            const hasMethod = serverCode.includes(`async ${toolName.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())}(`);
+            
+            console.log(`🔧 ${toolName}:`);
+            console.log(`  - 도구 정의: ${hasToolDefinition ? '✅' : '❌'}`);
+            console.log(`  - 핸들러: ${hasHandler ? '✅' : '❌'}`);
+            console.log(`  - 메서드: ${hasMethod ? '✅' : '❌'}`);
+        }
+        
+        // 기존 도구들도 확인
+        const existingTools = [
+            'read_file_content',
+            'read_directory_context', 
+            'read_file_chunk',
+            'get_file_info'
+        ];
+        
+        console.log('\n📋 기존 도구들:');
+        for (const toolName of existingTools) {
+            const hasDefinition = serverCode.includes(`name: '${toolName}'`);
+            console.log(`  - ${toolName}: ${hasDefinition ? '✅' : '❌'}`);
+        }
+    }
+    
+    // 새로운 도구들의 로직 테스트
+    testNewToolsLogic() {
+        console.log('\n=== 새 도구들 로직 검증 ===');
+        
+        // read_directory_structure 로직 시뮬레이션
+        console.log('🔍 read_directory_structure 로직:');
+        try {
+            const testDir = '.';
+            const items = fs.readdirSync(testDir);
+            const codeFiles = items.filter(item => {
+                const ext = path.extname(item).toLowerCase();
+                return ['.js', '.json', '.md'].includes(ext) && 
+                       !item.includes('node_modules') && 
+                       fs.statSync(item).isFile();
+            });
+            
+            console.log(`  - 발견된 코드 파일: ${codeFiles.length}개`);
+            codeFiles.forEach(file => {
+                const stats = fs.statSync(file);
+                const content = fs.readFileSync(file, 'utf8');
+                const lines = content.split('\n').length;
+                console.log(`    • ${file}: ${Math.round(stats.size/1024)}KB, ${lines}줄, 청킹필요: ${lines > 200 ? 'Yes' : 'No'}`);
+            });
+            
+        } catch (error) {
+            console.log(`  ❌ 테스트 실패: ${error.message}`);
+        }
+        
+        // read_file_smart 로직 시뮬레이션
+        console.log('\n🤖 read_file_smart 로직:');
+        const testFiles = ['test_small.js', 'test_medium.js', 'server.js'];
+        
+        testFiles.forEach(file => {
+            if (fs.existsSync(file)) {
+                const content = fs.readFileSync(file, 'utf8');
+                const lines = content.split('\n').length;
+                const recommendation = lines <= 200 ? '전체 제공' : `청크 제공 (${Math.ceil(lines/200)}개 청크)`;
+                console.log(`  - ${file}: ${lines}줄 → ${recommendation}`);
+            }
+        });
+    }
+    
+    // 기존 도구들 구문 검사
+    testExistingFunctions() {
+        console.log('\n=== 기존 도구들 구문 검사 ===');
         
         const functions = [
             'getFileInfo',
             'readFileChunk', 
-            'readFileLines'
+            'readFileLines',
+            'readDirectoryContext',
+            'readFileContent'
         ];
         
         try {
@@ -137,16 +219,23 @@ class NewFeaturesTester {
     async runAllTests() {
         this.testIntelligentFileReading();
         this.testFunctionSyntax();
+        this.testNewToolsLogic();
+        this.testExistingFunctions();
         this.testVersionConsistency();
         this.testDependencies();
         
         console.log('\n🎉 모든 테스트 완료!');
         console.log('\n📋 요약:');
-        console.log('- 문법 오류: 없음');
-        console.log('- 새로운 기능: 정상 구현됨'); 
+        console.log('- 새로운 MCP 도구: read_directory_structure, read_file_smart 추가');
+        console.log('- 지능형 파일 읽기: 200줄 기준 자동 처리'); 
         console.log('- 버전 일치: 확인됨');
         console.log('- 의존성: 정상 설치됨');
         console.log('- 서버 실행: 정상 작동');
+        
+        console.log('\n🚀 사용법:');
+        console.log('1. read_directory_structure("/path/to/dir") - 디렉토리 구조 및 메타데이터만');
+        console.log('2. read_file_smart("/path/to/file") - 작은 파일은 전체, 큰 파일은 청크');
+        console.log('3. 기존 도구들도 계속 사용 가능');
     }
 }
 

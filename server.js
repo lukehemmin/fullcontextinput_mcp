@@ -169,6 +169,54 @@ class FullContextInputMCPServer {
             }
           },
           {
+            name: 'read_directory_structure',
+            description: '디렉토리 구조와 파일 메타데이터만 제공합니다 (파일 내용 제외). 컨텍스트 초과 방지를 위한 사전 분석용.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                directory_path: {
+                  type: 'string',
+                  description: '분석할 디렉토리 경로 (절대경로 또는 상대경로)'
+                },
+                max_depth: {
+                  type: 'integer',
+                  description: '최대 탐색 깊이 (기본값: 10)',
+                  default: 10
+                },
+                include_extensions: {
+                  type: 'array',
+                  description: '포함할 파일 확장자 목록 (기본값: 일반적인 코드 파일)',
+                  items: { type: 'string' }
+                }
+              },
+              required: ['directory_path']
+            }
+          },
+          {
+            name: 'read_file_smart',
+            description: '파일 크기에 따라 지능적으로 읽기 방식을 결정합니다. 200줄 미만은 전체, 200줄 이상은 자동으로 청크 제공.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '읽을 파일의 경로'
+                },
+                chunk_number: {
+                  type: 'integer',
+                  description: '큰 파일의 경우 읽을 청크 번호 (기본값: 0)',
+                  default: 0
+                },
+                lines_per_chunk: {
+                  type: 'integer',
+                  description: '청크당 라인 수 (기본값: 200줄)',
+                  default: 200
+                }
+              },
+              required: ['file_path']
+            }
+          },
+          {
             name: 'read_directory_context',
             description: '디렉토리의 모든 코드 파일을 재귀적으로 읽어 전체 컨텍스트를 제공합니다. 컨텍스트 초과 방지 기능 포함.',
             inputSchema: {
@@ -293,11 +341,19 @@ class FullContextInputMCPServer {
           case 'read_file_content':
             return await this.readFileContent(args.file_path);
           
-          case 'find_files':
-            return await this.findFiles(args.pattern, args.workspace_path || '.');
+          case 'read_directory_structure':
+            return await this.readDirectoryStructure(
+              args.directory_path,
+              args.max_depth || 10,
+              args.include_extensions
+            );
           
-          case 'analyze_prompt_for_files':
-            return await this.analyzePromptForFiles(args.user_prompt, args.workspace_path || process.cwd());
+          case 'read_file_smart':
+            return await this.readFileSmart(
+              args.file_path,
+              args.chunk_number || 0,
+              args.lines_per_chunk || 200
+            );
           
           case 'read_directory_context':
             return await this.readDirectoryContext(
@@ -1079,6 +1135,210 @@ ${actualEndLine < totalLines ? `- read_file_lines(file_path="${filePath}", start
       };
     } catch (error) {
       throw new Error(`파일 라인 읽기 실패: ${filePath} - ${error.message}`);
+    }
+  }
+
+  // 디렉토리 구조와 파일 메타데이터만 제공 (내용 제외)
+  async readDirectoryStructure(directoryPath, maxDepth = 10, includeExtensions = null) {
+    try {
+      await this.waitForRateLimit();
+      
+      const fullPath = path.resolve(directoryPath);
+      
+      // 디렉토리 존재 확인
+      const stats = fs.statSync(fullPath);
+      if (!stats.isDirectory()) {
+        throw new Error(`경로가 디렉토리가 아닙니다: ${fullPath}`);
+      }
+      
+      // 기본 확장자 설정
+      const extensions = includeExtensions || [
+        'js', 'ts', 'jsx', 'tsx', 'vue', 'svelte', 'py', 'java', 'cpp', 'c', 'h', 'hpp',
+        'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt', 'scala', 'clj', 'dart', 'r',
+        'css', 'scss', 'sass', 'less', 'html', 'htm', 'xml', 'json', 'yaml', 'yml',
+        'md', 'markdown', 'txt', 'sql', 'sh', 'bash', 'ps1', 'dockerfile', 'makefile'
+      ];
+      
+      const allFiles = [];
+      const directoryStructure = [];
+      
+      // 재귀적으로 파일 수집 (메타데이터만)
+      await this.collectFilesMetadata(fullPath, allFiles, directoryStructure, extensions, 0, maxDepth);
+      
+      // 파일 메타데이터 생성
+      const filesMetadata = [];
+      for (const filePath of allFiles) {
+        try {
+          const fileStats = fs.statSync(filePath);
+          const content = fs.readFileSync(filePath, 'utf8');
+          const lines = content.split('\n').length;
+          const relativePath = path.relative(fullPath, filePath);
+          const ext = path.extname(filePath).substring(1).toLowerCase();
+          
+          filesMetadata.push({
+            path: relativePath,
+            absolute_path: filePath,
+            size: fileStats.size,
+            lines: lines,
+            extension: ext,
+            modified: fileStats.mtime.toISOString(),
+            needsChunking: lines > 200
+          });
+        } catch (error) {
+          console.warn(`파일 메타데이터 읽기 실패: ${filePath} - ${error.message}`);
+        }
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              directory: directoryPath,
+              absolute_path: fullPath,
+              total_files: allFiles.length,
+              max_depth: maxDepth,
+              included_extensions: extensions,
+              directory_structure: directoryStructure,
+              files_metadata: filesMetadata,
+              summary: {
+                small_files: filesMetadata.filter(f => f.lines <= 200).length,
+                large_files: filesMetadata.filter(f => f.lines > 200).length,
+                total_lines: filesMetadata.reduce((sum, f) => sum + f.lines, 0),
+                total_size: filesMetadata.reduce((sum, f) => sum + f.size, 0)
+              }
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`디렉토리 구조 읽기 실패: ${directoryPath} - ${error.message}`);
+    }
+  }
+  
+  // 파일 메타데이터만 수집하는 재귀 함수
+  async collectFilesMetadata(dirPath, allFiles, structure, extensions, currentDepth, maxDepth) {
+    if (currentDepth >= maxDepth) return;
+    
+    try {
+      const items = fs.readdirSync(dirPath);
+      const currentLevel = [];
+      
+      for (const item of items) {
+        const itemPath = path.join(dirPath, item);
+        const stats = fs.statSync(itemPath);
+        
+        // 무시할 패턴
+        const ignorePatterns = [
+          'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
+          'coverage', '.nyc_output', '.cache', '.vscode', '.idea',
+          'tmp', 'temp', '.DS_Store', 'Thumbs.db'
+        ];
+        
+        if (ignorePatterns.some(pattern => item.includes(pattern))) {
+          continue;
+        }
+        
+        if (stats.isDirectory()) {
+          const subStructure = [];
+          currentLevel.push({
+            name: item,
+            type: 'directory',
+            children: subStructure
+          });
+          
+          await this.collectFilesMetadata(itemPath, allFiles, subStructure, extensions, currentDepth + 1, maxDepth);
+        } else if (stats.isFile()) {
+          const ext = path.extname(item).substring(1).toLowerCase();
+          
+          if (extensions.includes(ext)) {
+            allFiles.push(itemPath);
+            currentLevel.push({
+              name: item,
+              type: 'file',
+              extension: ext,
+              size: stats.size
+            });
+          }
+        }
+      }
+      
+      structure.push(...currentLevel);
+    } catch (error) {
+      console.warn(`디렉토리 읽기 실패: ${dirPath} - ${error.message}`);
+    }
+  }
+  
+  // 파일 크기에 따라 지능적으로 읽기 방식 결정
+  async readFileSmart(filePath, chunkNumber = 0, linesPerChunk = 200) {
+    try {
+      await this.waitForRateLimit();
+      
+      const stats = fs.statSync(filePath);
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+      
+      // 200줄 미만: 전체 제공
+      if (totalLines <= 200) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `파일: ${filePath}
+크기: ${stats.size} bytes (${Math.round(stats.size/1024)}KB)
+라인 수: ${totalLines}
+수정일: ${stats.mtime.toISOString()}
+
+✅ 소형 파일 - 전체 제공
+이 파일은 ${totalLines}줄로 전체를 한 번에 제공합니다.
+
+=== 파일 전체 내용 ===
+${content}
+=== 파일 완료 (${totalLines}/${totalLines} 라인) ===`
+            }
+          ]
+        };
+      }
+      
+      // 200줄 이상: 청크 제공
+      const totalChunks = Math.ceil(totalLines / linesPerChunk);
+      
+      if (chunkNumber >= totalChunks) {
+        throw new Error(`청크 번호가 범위를 벗어났습니다. 총 청크 수: ${totalChunks}, 요청한 청크: ${chunkNumber}`);
+      }
+      
+      const startLine = chunkNumber * linesPerChunk;
+      const endLine = Math.min(startLine + linesPerChunk - 1, totalLines - 1);
+      const chunkLines = lines.slice(startLine, endLine + 1);
+      const chunkContent = chunkLines.join('\n');
+      const chunkSizeKB = Math.round(Buffer.byteLength(chunkContent, 'utf8') / 1024);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `파일: ${filePath}
+총 크기: ${stats.size} bytes (${Math.round(stats.size/1024)}KB)
+총 라인: ${totalLines}
+청크 정보: ${chunkNumber + 1}/${totalChunks} (${linesPerChunk}줄씩)
+라인 범위: ${startLine + 1}-${endLine + 1} (이 청크 크기: ${chunkSizeKB}KB)
+
+🤖 지능형 파일 읽기 (큰 파일 자동 청크)
+200줄 이상 파일이므로 청크 단위로 제공합니다.
+
+=== 청크 ${chunkNumber + 1} (라인 ${startLine + 1}-${endLine + 1}) ===
+${chunkContent}
+=== 청크 끝 ===
+
+${chunkNumber + 1 < totalChunks ? `💡 다음 청크를 읽으려면:
+read_file_smart(file_path="${filePath}", chunk_number=${chunkNumber + 1})` : '🎉 모든 청크를 읽었습니다!'}`
+          }
+        ]
+      };
+      
+    } catch (error) {
+      throw new Error(`지능형 파일 읽기 실패: ${filePath} - ${error.message}`);
     }
   }
 
