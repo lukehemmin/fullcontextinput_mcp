@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { CodeValidator } from '../core/CodeValidator.js';
 import { FileUtils } from '../core/FileUtils.js';
 
@@ -9,8 +10,48 @@ import { FileUtils } from '../core/FileUtils.js';
 export class SafetyHandler {
   constructor(baseServer) {
     this.baseServer = baseServer;
-    this.backupDir = path.join(process.cwd(), 'fullcontextmcp_backup');
+    // npm 전역 설치 시에도 안전한 백업 폴더 경로 설정
+    // 현재 작업 디렉토리에 백업 폴더 생성 (권한이 있는 경우)
+    // 권한이 없으면 사용자 홈 디렉토리에 생성
+    this.backupDir = this.getSafeBackupPath();
     this.ensureBackupDir();
+  }
+
+  /**
+   * 안전한 백업 폴더 경로 결정
+   * 1순위: 현재 작업 디렉토리 (쓰기 권한이 있는 경우)
+   * 2순위: 사용자 홈 디렉토리
+   * 3순위: 임시 디렉토리
+   */
+  getSafeBackupPath() {
+    
+    // 1순위: 현재 작업 디렉토리
+    const cwdBackup = path.join(process.cwd(), 'fullcontextmcp_backup');
+    try {
+      // 테스트용 파일 생성으로 쓰기 권한 확인
+      const testFile = path.join(process.cwd(), '.write_test_tmp');
+      fs.writeFileSync(testFile, 'test');
+      fs.unlinkSync(testFile);
+      return cwdBackup;
+    } catch (error) {
+      console.log(`⚠️ 현재 디렉토리에 쓰기 권한 없음: ${process.cwd()}`);
+    }
+    
+    // 2순위: 사용자 홈 디렉토리
+    const homeBackup = path.join(os.homedir(), '.fullcontextmcp_backup');
+    try {
+      const testFile = path.join(os.homedir(), '.write_test_tmp');
+      fs.writeFileSync(testFile, 'test');
+      fs.unlinkSync(testFile);
+      return homeBackup;
+    } catch (error) {
+      console.log(`⚠️ 홈 디렉토리에 쓰기 권한 없음: ${os.homedir()}`);
+    }
+    
+    // 3순위: 임시 디렉토리
+    const tmpBackup = path.join(os.tmpdir(), 'fullcontextmcp_backup');
+    console.log(`📁 임시 디렉토리 사용: ${tmpBackup}`);
+    return tmpBackup;
   }
 
   /**
