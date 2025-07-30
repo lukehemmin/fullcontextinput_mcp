@@ -9,16 +9,59 @@ import { FileUtils } from '../core/FileUtils.js';
 export class SafetyHandler {
   constructor(baseServer) {
     this.baseServer = baseServer;
-    this.backupDir = path.join(process.cwd(), '.ai_backups');
+    this.backupDir = path.join(process.cwd(), 'fullcontextmcp_backup');
     this.ensureBackupDir();
   }
 
   /**
-   * 백업 디렉토리 생성 보장
+   * 백업 디렉토리 생성 보장 및 .gitignore 자동 등록
    */
   ensureBackupDir() {
     if (!fs.existsSync(this.backupDir)) {
+      // 백업 디렉토리 생성
       fs.mkdirSync(this.backupDir, { recursive: true });
+      console.log(`📁 백업 폴더 생성: ${this.backupDir}`);
+      
+      // .gitignore에 자동 추가
+      this.ensureGitIgnore();
+    }
+  }
+
+  /**
+   * .gitignore에 백업 폴더 자동 등록
+   */
+  ensureGitIgnore() {
+    const gitIgnorePath = path.join(process.cwd(), '.gitignore');
+    const backupFolderName = path.basename(this.backupDir) + '/';
+    
+    try {
+      let gitIgnoreContent = '';
+      
+      // 기존 .gitignore 읽기 (없으면 빈 문자열)
+      if (fs.existsSync(gitIgnorePath)) {
+        gitIgnoreContent = fs.readFileSync(gitIgnorePath, 'utf8');
+      }
+      
+      // 이미 백업 폴더가 등록되어 있는지 확인
+      const lines = gitIgnoreContent.split('\n');
+      const alreadyExists = lines.some(line => 
+        line.trim() === backupFolderName || 
+        line.trim() === backupFolderName.slice(0, -1) // 슬래시 없는 버전도 체크
+      );
+      
+      if (!alreadyExists) {
+        // .gitignore에 백업 폴더 추가
+        const newContent = gitIgnoreContent.trim() + 
+          (gitIgnoreContent.trim() ? '\n' : '') + 
+          backupFolderName + '\n';
+        
+        fs.writeFileSync(gitIgnorePath, newContent);
+        console.log(`📝 .gitignore에 백업 폴더 추가: ${backupFolderName}`);
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️  .gitignore 업데이트 실패: ${error.message}`);
+      // .gitignore 업데이트 실패해도 백업 기능은 계속 작동
     }
   }
 
