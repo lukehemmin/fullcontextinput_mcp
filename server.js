@@ -16,7 +16,7 @@ class FullContextInputMCPServer {
   constructor() {
     this.server = new Server({
       name: 'fullcontextinput_mcp',
-      version: '1.0.5',
+      version: '1.1.0',
     }, {
       capabilities: {
         tools: {},
@@ -325,6 +325,128 @@ class FullContextInputMCPServer {
               },
               required: ['file_path']
             }
+          },
+          {
+            name: 'write_file_complete',
+            description: '짧은 코드(5000-6000토큰 미만)를 파일에 완전히 작성합니다. 파일이 없으면 생성하고, 있으면 덮어씁니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '작성할 파일의 경로'
+                },
+                content: {
+                  type: 'string',
+                  description: '파일에 작성할 전체 코드 내용'
+                },
+                encoding: {
+                  type: 'string',
+                  description: '파일 인코딩 (기본값: utf8)',
+                  default: 'utf8'
+                }
+              },
+              required: ['file_path', 'content']
+            }
+          },
+          {
+            name: 'write_file_diff',
+            description: '긴 코드(6000토큰 초과)를 diff 방식으로 수정합니다. 기존 파일을 읽고 지정된 라인 범위를 새로운 내용으로 교체합니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '수정할 파일의 경로'
+                },
+                start_line: {
+                  type: 'integer',
+                  description: '교체할 시작 라인 번호 (1부터 시작)'
+                },
+                end_line: {
+                  type: 'integer',
+                  description: '교체할 끝 라인 번호 (inclusive)'
+                },
+                new_content: {
+                  type: 'string',
+                  description: '교체할 새로운 코드 내용'
+                },
+                backup: {
+                  type: 'boolean',
+                  description: '백업 파일 생성 여부 (기본값: true)',
+                  default: true
+                }
+              },
+              required: ['file_path', 'start_line', 'end_line', 'new_content']
+            }
+          },
+          {
+            name: 'preview_file_diff',
+            description: '파일 수정 전에 diff 미리보기를 제공합니다. 실제 수정 없이 변경사항을 확인할 수 있습니다.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '미리볼 파일의 경로'
+                },
+                start_line: {
+                  type: 'integer',
+                  description: '교체할 시작 라인 번호'
+                },
+                end_line: {
+                  type: 'integer',
+                  description: '교체할 끝 라인 번호'
+                },
+                new_content: {
+                  type: 'string',
+                  description: '교체할 새로운 코드 내용'
+                }
+              },
+              required: ['file_path', 'start_line', 'end_line', 'new_content']
+            }
+          },
+          {
+            name: 'validate_code_syntax',
+            description: '코드 문법을 검증하고 잘못된 코드나 누락된 부분을 감지합니다. AI 할루시네이션 방지용.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                content: {
+                  type: 'string',
+                  description: '검증할 코드 내용'
+                },
+                file_extension: {
+                  type: 'string',
+                  description: '파일 확장자 (js, ts, py 등)'
+                },
+                original_file_path: {
+                  type: 'string',
+                  description: '비교할 원본 파일 경로 (선택사항)',
+                  required: false
+                }
+              },
+              required: ['content', 'file_extension']
+            }
+          },
+          {
+            name: 'restore_from_backup',
+            description: '백업 파일에서 코드를 복구합니다. AI 오류로 인한 코드 손상 시 사용.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: '복구할 파일의 경로'
+                },
+                backup_path: {
+                  type: 'string',
+                  description: '백업 파일 경로 (선택사항, 비어있으면 최신 백업 사용)',
+                  required: false
+                }
+              },
+              required: ['file_path']
+            }
           }
         ]
       };
@@ -382,6 +504,43 @@ class FullContextInputMCPServer {
               args.start_line || 1,
               args.end_line,
               args.max_lines || 100
+            );
+          
+          case 'write_file_complete':
+            return await this.writeFileComplete(
+              args.file_path,
+              args.content,
+              args.encoding || 'utf8'
+            );
+          
+          case 'write_file_diff':
+            return await this.writeFileDiff(
+              args.file_path,
+              args.start_line,
+              args.end_line,
+              args.new_content,
+              args.backup !== false
+            );
+          
+          case 'preview_file_diff':
+            return await this.previewFileDiff(
+              args.file_path,
+              args.start_line,
+              args.end_line,
+              args.new_content
+            );
+          
+          case 'validate_code_syntax':
+            return await this.validateCodeSyntax(
+              args.content,
+              args.file_extension,
+              args.original_file_path
+            );
+          
+          case 'restore_from_backup':
+            return await this.restoreFromBackup(
+              args.file_path,
+              args.backup_path
             );
           
           default:
@@ -1343,6 +1502,165 @@ ${chunkNumber + 1 < totalChunks ?
       
     } catch (error) {
       throw new Error(`지능형 파일 읽기 실패: ${filePath} - ${error.message}`);
+    }
+  }
+
+  // 파일 전체 작성 (짧은 코드용)
+  async writeFileComplete(filePath, content, encoding = 'utf8') {
+    try {
+      // Rate Limiting 대기
+      await this.waitForRateLimit();
+      
+      // 디렉토리가 없으면 생성
+      const dirPath = path.dirname(filePath);
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+      }
+      
+      // 기존 파일 백업 (있는 경우)
+      let backupPath = null;
+      let originalExists = false;
+      if (fs.existsSync(filePath)) {
+        originalExists = true;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const ext = path.extname(filePath);
+        const name = path.basename(filePath, ext);
+        backupPath = path.join(dirPath, `${name}_backup_${timestamp}${ext}`);
+        
+        // 백업 생성
+        fs.copyFileSync(filePath, backupPath);
+      }
+      
+      // 새 파일 작성
+      fs.writeFileSync(filePath, content, encoding);
+      
+      // 결과 정보
+      const stats = fs.statSync(filePath);
+      const lines = content.split('\n').length;
+      const sizeKB = Math.round(stats.size / 1024 * 10) / 10;
+      
+      // 캐시 무효화 (기존 캐시 제거)
+      this.fileCache.delete(filePath);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ 파일 작성 완료: ${filePath}
+
+📊 파일 정보:
+- 크기: ${stats.size} bytes (${sizeKB}KB)
+- 라인 수: ${lines}
+- 인코딩: ${encoding}
+- 작성 시간: ${new Date().toISOString()}
+
+${originalExists ? 
+  `📋 기존 파일 상태:
+- 기존 파일을 덮어썼습니다
+- 백업 생성: ${backupPath}` : 
+  '📋 새 파일 생성됨'
+}
+
+🎯 작성 모드: 전체 파일 교체
+💡 이 기능은 5000-6000토큰 미만의 짧은 코드에 최적화되어 있습니다.`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`파일 작성 실패: ${filePath} - ${error.message}`);
+    }
+  }
+
+  // 파일 부분 수정 (긴 코드용 diff 방식)
+  async writeFileDiff(filePath, startLine, endLine, newContent, createBackup = true) {
+    try {
+      // Rate Limiting 대기
+      await this.waitForRateLimit();
+      
+      // 파일이 존재하는지 확인
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`수정할 파일이 존재하지 않습니다: ${filePath}`);
+      }
+      
+      // 기존 파일 읽기
+      const originalContent = fs.readFileSync(filePath, 'utf8');
+      const originalLines = originalContent.split('\n');
+      const totalLines = originalLines.length;
+      
+      // 라인 번호 검증
+      if (startLine < 1 || endLine < startLine || startLine > totalLines) {
+        throw new Error(`잘못된 라인 범위: ${startLine}-${endLine} (파일은 ${totalLines}줄)`);
+      }
+      
+      // 백업 생성 (선택적)
+      let backupPath = null;
+      if (createBackup) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const dirPath = path.dirname(filePath);
+        const ext = path.extname(filePath);
+        const name = path.basename(filePath, ext);
+        backupPath = path.join(dirPath, `${name}_backup_${timestamp}${ext}`);
+        
+        fs.copyFileSync(filePath, backupPath);
+      }
+      
+      // diff 적용
+      const beforeLines = originalLines.slice(0, startLine - 1);
+      const afterLines = originalLines.slice(endLine);
+      const newContentLines = newContent.split('\n');
+      
+      // 새로운 파일 내용 구성
+      const modifiedLines = [...beforeLines, ...newContentLines, ...afterLines];
+      const modifiedContent = modifiedLines.join('\n');
+      
+      // 파일 쓰기
+      fs.writeFileSync(filePath, modifiedContent, 'utf8');
+      
+      // 결과 정보
+      const newStats = fs.statSync(filePath);
+      const newTotalLines = modifiedLines.length;
+      const newSizeKB = Math.round(newStats.size / 1024 * 10) / 10;
+      
+      // 변경 통계
+      const originalRangeLines = endLine - startLine + 1;
+      const newRangeLines = newContentLines.length;
+      const lineDelta = newRangeLines - originalRangeLines;
+      
+      // 캐시 무효화
+      this.fileCache.delete(filePath);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Diff 수정 완료: ${filePath}
+
+📊 수정 정보:
+- 수정 범위: ${startLine}-${endLine}줄 (${originalRangeLines}줄 → ${newRangeLines}줄)
+- 라인 변화: ${lineDelta >= 0 ? '+' : ''}${lineDelta}줄
+- 전체 라인: ${totalLines}줄 → ${newTotalLines}줄
+- 파일 크기: ${newSizeKB}KB
+- 수정 시간: ${new Date().toISOString()}
+
+${createBackup ? 
+  `📋 백업 정보:
+- 백업 생성: ${backupPath}
+- 원본 보관됨` : 
+  '📋 백업 생성 안함'
+}
+
+🎯 수정 모드: 라인 범위 교체 (Diff)
+💡 이 기능은 6000토큰 초과의 긴 코드 수정에 최적화되어 있습니다.
+
+🔍 수정된 내용 미리보기:
+=== 새로 추가된 코드 (${newRangeLines}줄) ===
+${newContent.slice(0, 500)}${newContent.length > 500 ? '\n... (총 ' + newRangeLines + '줄)' : ''}
+=== 미리보기 끝 ===`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`Diff 수정 실패: ${filePath} - ${error.message}`);
     }
   }
 
