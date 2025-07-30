@@ -379,74 +379,6 @@ class FullContextInputMCPServer {
               },
               required: ['file_path', 'start_line', 'end_line', 'new_content']
             }
-          },
-          {
-            name: 'preview_file_diff',
-            description: '파일 수정 전에 diff 미리보기를 제공합니다. 실제 수정 없이 변경사항을 확인할 수 있습니다.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                file_path: {
-                  type: 'string',
-                  description: '미리볼 파일의 경로'
-                },
-                start_line: {
-                  type: 'integer',
-                  description: '교체할 시작 라인 번호'
-                },
-                end_line: {
-                  type: 'integer',
-                  description: '교체할 끝 라인 번호'
-                },
-                new_content: {
-                  type: 'string',
-                  description: '교체할 새로운 코드 내용'
-                }
-              },
-              required: ['file_path', 'start_line', 'end_line', 'new_content']
-            }
-          },
-          {
-            name: 'validate_code_syntax',
-            description: '코드 문법을 검증하고 잘못된 코드나 누락된 부분을 감지합니다. AI 할루시네이션 방지용.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                content: {
-                  type: 'string',
-                  description: '검증할 코드 내용'
-                },
-                file_extension: {
-                  type: 'string',
-                  description: '파일 확장자 (js, ts, py 등)'
-                },
-                original_file_path: {
-                  type: 'string',
-                  description: '비교할 원본 파일 경로 (선택사항)',
-                  required: false
-                }
-              },
-              required: ['content', 'file_extension']
-            }
-          },
-          {
-            name: 'restore_from_backup',
-            description: '백업 파일에서 코드를 복구합니다. AI 오류로 인한 코드 손상 시 사용.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                file_path: {
-                  type: 'string',
-                  description: '복구할 파일의 경로'
-                },
-                backup_path: {
-                  type: 'string',
-                  description: '백업 파일 경로 (선택사항, 비어있으면 최신 백업 사용)',
-                  required: false
-                }
-              },
-              required: ['file_path']
-            }
           }
         ]
       };
@@ -520,27 +452,6 @@ class FullContextInputMCPServer {
               args.end_line,
               args.new_content,
               args.backup !== false
-            );
-          
-          case 'preview_file_diff':
-            return await this.previewFileDiff(
-              args.file_path,
-              args.start_line,
-              args.end_line,
-              args.new_content
-            );
-          
-          case 'validate_code_syntax':
-            return await this.validateCodeSyntax(
-              args.content,
-              args.file_extension,
-              args.original_file_path
-            );
-          
-          case 'restore_from_backup':
-            return await this.restoreFromBackup(
-              args.file_path,
-              args.backup_path
             );
           
           default:
