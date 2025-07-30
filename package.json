@@ -1,6 +1,6 @@
 {
   "name": "fullcontextinput_mcp",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "MCP 서버 - AI 툴에서 프롬프트의 파일명/디렉토리를 자동 인식하고 전체 코드 컨텍스트를 제공하는 도구",
   "main": "server.js",
   "type": "module",
